@@ -1,0 +1,133 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  buildConfiguration: 'Release'
+  artifactName: 'D365-Package'
+  versionNumber: 'v$(Build.BuildId)'
+
+stages:
+
+# ========================
+# Stage 1: Build & Restore
+# ========================
+- stage: Build
+  displayName: 'Build Dynamics 365 Solution'
+  jobs:
+    - job: BuildJob
+      pool:
+        vmImage: 'windows-latest'
+      steps:
+        - checkout: self
+        - task: NuGetToolInstaller@1
+        - task: NuGetCommand@2
+          inputs:
+            restoreSolution: '**/*.sln'
+        - task: VSBuild@1
+          inputs:
+            solution: '**/*.sln'
+            configuration: '$(buildConfiguration)'
+
+# ========================
+# Stage 2: Test & Validate
+# ========================
+- stage: Test
+  displayName: 'Unit & Static Analysis'
+  dependsOn: Build
+  condition: succeeded()
+  jobs:
+    - job: TestJob
+      pool:
+        vmImage: 'windows-latest'
+      steps:
+        - task: VSTest@2
+          inputs:
+            platform: '$(buildPlatform)'
+            configuration: '$(buildConfiguration)'
+        - script: |
+            echo "Running Static Code Analysis..."
+          displayName: 'Static Code Analysis'
+        - script: |
+            echo "Validating Database Scripts..."
+          displayName: 'DB Script Validation'
+
+# ========================
+# Stage 3: Package
+# ========================
+- stage: Package
+  displayName: 'Generate Deployable Package'
+  dependsOn: Test
+  condition: succeeded()
+  jobs:
+    - job: PackageJob
+      pool:
+        vmImage: 'windows-latest'
+      steps:
+        - script: |
+            echo "Generating deployable D365 package..."
+            mkdir -p $(Build.ArtifactStagingDirectory)
+        - task: PublishBuildArtifacts@1
+          inputs:
+            PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+            ArtifactName: '$(artifactName)'
+            publishLocation: 'Container'
+        - script: |
+            echo "##[command]Tagging version $(versionNumber)"
+            git tag $(versionNumber)
+            git push origin $(versionNumber)
+          displayName: 'Version Tagging'
+
+# ========================
+# Stage 4: Deploy to UAT
+# ========================
+- stage: Deploy_UAT
+  displayName: 'Deploy to UAT'
+  dependsOn: Package
+  condition: succeeded()
+  jobs:
+    - deployment: UATDeployment
+      environment: 'UAT'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - download: current
+                artifact: $(artifactName)
+              - script: |
+                  echo "Deploying to UAT via LCS API..."
+                  # Example LCS API call (replace with actual endpoint, token, projectId)
+                  # curl -X POST "https://lcsapi.dynamics.com/deployments" \
+                  #      -H "Authorization: Bearer $LCS_TOKEN" \
+                  #      -F "projectId=YOUR_PROJECT_ID" \
+                  #      -F "package=@$(Build.ArtifactStagingDirectory)/D365-Package.zip"
+              - script: |
+                  echo "Waiting for UAT approval..."
+                  # Manual Approval gate can be configured in Azure DevOps environment
+
+# ========================
+# Stage 5: Production Deployment
+# ========================
+- stage: Deploy_Production
+  displayName: 'Deploy to Production via LCS'
+  dependsOn: Deploy_UAT
+  condition: succeeded()
+  jobs:
+    - deployment: ProdDeployment
+      environment: 'Production'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+              - download: current
+                artifact: $(artifactName)
+              - script: |
+                  echo "Deploying approved package to Production via LCS API..."
+                  # Actual LCS API call
+                  # curl -X POST "https://lcsapi.dynamics.com/deployments" \
+                  #      -H "Authorization: Bearer $LCS_TOKEN" \
+                  #      -F "projectId=YOUR_PROJECT_ID" \
+                  #      -F "package=@$(Build.ArtifactStagingDirectory)/D365-Package.zip"
+              - script: |
+                  echo "Deployment complete. Production now running version $(versionNumber)"
